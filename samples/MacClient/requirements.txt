@@ -1,0 +1,7 @@
+websockets
+pyaudio
+opencv-python
+requests
+numpy
+python-dotenv
+asyncio
