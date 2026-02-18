@@ -25,8 +25,10 @@ enum StreamingStatus {
 }
 
 enum StreamingMode {
+
   case glasses
   case iPhone
+  case network
 }
 
 @MainActor
@@ -38,7 +40,9 @@ class StreamSessionViewModel: ObservableObject {
   @Published var errorMessage: String = ""
   @Published var hasActiveDevice: Bool = false
   @Published var streamingMode: StreamingMode = .glasses
+
   @Published var selectedResolution: StreamingResolution = .low
+  @Published var serverAddress: String = "localhost"
 
   var isStreaming: Bool {
     streamingStatus != .stopped
@@ -74,6 +78,7 @@ class StreamSessionViewModel: ObservableObject {
   private let deviceSelector: AutoDeviceSelector
   private var deviceMonitorTask: Task<Void, Never>?
   private var iPhoneCameraManager: IPhoneCameraManager?
+  private var networkCameraManager: NetworkCameraManager?
 
   init(wearables: WearablesInterface) {
     self.wearables = wearables
@@ -197,6 +202,9 @@ class StreamSessionViewModel: ObservableObject {
     if streamingMode == .iPhone {
       stopIPhoneSession()
       return
+    } else if streamingMode == .network {
+      stopNetworkSession()
+      return
     }
     await streamSession.stop()
   }
@@ -242,12 +250,68 @@ class StreamSessionViewModel: ObservableObject {
     NSLog("[Stream] iPhone camera mode stopped")
   }
 
-  func dismissError() {
+    // MARK: - Network Camera Mode
+
+  func handleStartNetwork() {
+     startNetworkSession()
+  }
+
+  private func startNetworkSession() {
+    streamingMode = .network
+    let manager = NetworkCameraManager(host: serverAddress)
+    
+    manager.onFrameCaptured = { [weak self] image in
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        self.currentVideoFrame = image
+        if !self.hasReceivedFirstFrame {
+          self.hasReceivedFirstFrame = true
+        }
+        self.geminiSessionVM?.sendVideoFrameIfThrottled(image: image)
+        self.webrtcSessionVM?.pushVideoFrame(image)
+      }
+    }
+    
+    manager.onImageCaptured = { [weak self] image in
+      Task { @MainActor [weak self] in
+        self?.capturedPhoto = image
+        self?.showPhotoPreview = true
+      }
+    }
+    
+    manager.onError = { [weak self] errorMsg in
+       Task { @MainActor [weak self] in 
+         // Only show error if we are genuinely in network mode and likely want valid feedback
+         // self?.showError(errorMsg) 
+         NSLog("[Network] Error: %@", errorMsg)
+       }
+    }
+
+    manager.start()
+    networkCameraManager = manager
+    streamingStatus = .streaming
+    NSLog("[Stream] Network camera mode started")
+  }
+
+  private func stopNetworkSession() {
+    networkCameraManager?.stop()
+    networkCameraManager = nil
+    currentVideoFrame = nil
+    hasReceivedFirstFrame = false
+    streamingStatus = .stopped
+    streamingMode = .glasses
+    NSLog("[Stream] Network camera mode stopped")
+  }
+
     showError = false
     errorMessage = ""
   }
 
   func capturePhoto() {
+    if streamingMode == .network {
+      networkCameraManager?.captureStillImage()
+      return
+    }
     streamSession.capturePhoto(format: .jpeg)
   }
 

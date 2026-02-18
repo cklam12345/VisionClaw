@@ -104,15 +104,33 @@ struct NonStreamView: View {
         }
         .padding(.bottom, 12)
 
-        CustomButton(
-          title: "Start on iPhone",
-          style: .secondary,
-          isDisabled: false
-        ) {
-          Task {
-            await viewModel.handleStartIPhone()
+          CustomButton(
+            title: "Start on iPhone",
+            style: .secondary,
+            isDisabled: false
+          ) {
+            Task {
+              await viewModel.handleStartIPhone()
+            }
           }
-        }
+          
+          VStack(spacing: 8) {
+            TextField("Server IP (e.g. 192.168.1.5)", text: $viewModel.serverAddress)
+              .textFieldStyle(.roundedBorder)
+              .keyboardType(.numbersAndPunctuation)
+              .autocapitalization(.none)
+              .disableAutocorrection(true)
+              .padding(.horizontal, 40)
+              
+            CustomButton(
+              title: "Start Network Camera",
+              style: .secondary,
+              isDisabled: viewModel.serverAddress.isEmpty
+            ) {
+               viewModel.handleStartNetwork()
+            }
+          }
+
 
         CustomButton(
           title: "Start streaming",
