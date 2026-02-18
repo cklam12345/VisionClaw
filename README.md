@@ -207,7 +207,7 @@ Gemini Live supports function calling. This app declares a single `execute` tool
 - Gemini API key ([get one free](https://aistudio.google.com/apikey))
 - Meta Ray-Ban glasses (optional -- use iPhone mode for testing)
 - OpenClaw on your Mac (optional -- for agentic actions)
-
+- HP Poly Headset Camera -- for hp custom headset camera "morph"
 ## Troubleshooting
 
 **"Gemini API key not configured"** -- Open `GeminiConfig.swift` and add your API key.
