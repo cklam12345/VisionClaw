@@ -79,44 +79,75 @@ async def video_capture_loop():
         print("[Video] No CAMERA_URL provided. Video disabled.")
         return
 
-    cap = cv2.VideoCapture(CAMERA_URL)
-    if not cap.isOpened():
-        print(f"[Video] Failed to open stream: {CAMERA_URL}")
-        return
-
-    print(f"[Video] Streaming from {CAMERA_URL}")
+    is_polling_mode = CAMERA_URL.endswith("/capture")
     
+    if not is_polling_mode:
+        cap = cv2.VideoCapture(CAMERA_URL)
+        if not cap.isOpened():
+            print(f"[Video] Failed to open stream: {CAMERA_URL}")
+            return
+        print(f"[Video] Streaming from {CAMERA_URL} (MJPEG)")
+    else:
+        print(f"[Video] Polling from {CAMERA_URL} (Project Morph)")
+
     last_frame_time = 0.0
     while video_loop_running:
-        ret, frame = cap.read()
-        if not ret:
-            print("[Video] Create capture failed, reconnecting...")
-            cap.release()
-            await asyncio.sleep(2)
-            cap = cv2.VideoCapture(CAMERA_URL)
-            continue
-            
         now = time.time()
         if now - last_frame_time >= (1.0 / FPS_TARGET):
-            # Resize/Compress
-            # Gemini expects JPEG bytes
-            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            jpg_bytes = buffer.tobytes()
-            
-            # Add to queue (drop old if full)
-            if frame_queue.full():
-                try: frame_queue.get_nowait()
-                except: pass
-            await frame_queue.put(jpg_bytes)
-            
-            last_frame_time = now
+            try:
+                if is_polling_mode:
+                    # Request still image from Morph camera
+                    response = await asyncio.get_event_loop().run_in_executor(None, lambda: requests.get(CAMERA_URL, timeout=5))
+                    if response.status_code == 200:
+                        jpg_bytes = response.content
+                    else:
+                        print(f"[Video] Morph capture failed: {response.status_code}")
+                        await asyncio.sleep(1)
+                        continue
+                else:
+                    # Read from MJPEG stream
+                    ret, frame = cap.read()
+                    if not ret:
+                        print("[Video] Create capture failed, reconnecting...")
+                        cap.release()
+                        await asyncio.sleep(2)
+                        cap = cv2.VideoCapture(CAMERA_URL)
+                        continue
+                    
+                    # Resize/Compress
+                    # Gemini expects JPEG bytes
+                    _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                    jpg_bytes = buffer.tobytes()
+                
+                # Add to queue (drop old if full)
+                if frame_queue.full():
+                    try: frame_queue.get_nowait()
+                    except: pass
+                await frame_queue.put(jpg_bytes)
+                
+                last_frame_time = now
+            except Exception as e:
+                print(f"[Video] Capture error: {e}")
+                await asyncio.sleep(1)
             
         await asyncio.sleep(0.01) # Yield slightly
         
-    cap.release()
+    if not is_polling_mode:
+        cap.release()
 
 # --- Main WebSocket Loop ---
 async def gemini_session():
+    print("""
+    ==================================================
+    🚀 PROJECT MORPH - CES 2027 INDUSTRIAL ORCHESTRATOR
+    ==================================================
+    [Status] System Initializing...
+    [Vision] Morph Camera: {}
+    [Audio]  BLE Headset: Enabled
+    [Claw]   Gateway: {}
+    ==================================================
+    """.format(CAMERA_URL, OPENCLAW_HOST))
+
     # Setup PyAudio
     p = pyaudio.PyAudio()
     
@@ -143,17 +174,53 @@ async def gemini_session():
             "setup": {
                 "model": MODEL,
                 "tools": [{
-                    "functionDeclarations": [{
-                        "name": "execute",
-                        "description": "Execute a task using the user's personal assistant (OpenClaw). Use this for searches, messaging, lists, and controlling devices.",
-                        "parameters": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "task": {"type": "STRING", "description": "The detailed task to perform."}
-                            },
-                            "required": ["task"]
+                    "functionDeclarations": [
+                        {
+                            "name": "research_hardware",
+                            "description": "Researches compact hardware modules (like ESP32S3) based on size constraints.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "requirements": {"type": "STRING", "description": "Dimension and feature requirements."}
+                                },
+                                "required": ["requirements"]
+                            }
+                        },
+                        {
+                            "name": "retrieve_module_stl",
+                            "description": "Searches for and downloads the STL/CAD asset for a specific hardware module.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "selected_module": {"type": "STRING", "description": "The name of the module to retrieve."}
+                                },
+                                "required": ["selected_module"]
+                            }
+                        },
+                        {
+                            "name": "scaffold_design",
+                            "description": "Uses Blender to generate a custom 3D casing for a module to fit a specific headset headband.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "asset_path": {"type": "STRING", "description": "Path to the hardware STL."},
+                                    "target_headset": {"type": "STRING", "description": "The target headset model (e.g., Poly Focus 5)."}
+                                },
+                                "required": ["asset_path", "target_headset"]
+                            }
+                        },
+                        {
+                            "name": "execute",
+                            "description": "General task execution via OpenClaw.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "task": {"type": "STRING", "description": "The task description."}
+                                },
+                                "required": ["task"]
+                            }
                         }
-                    }]
+                    ]
                 }]
             }
         }
@@ -218,23 +285,32 @@ async def gemini_session():
                     tool_name = fc["name"]
                     args = fc["args"]
                     
-                    if tool_name == "execute": # Assuming standard tool call
+                    # Route all tools through the same OpenClaw bridge for the demo
+                    if tool_name == "research_hardware":
+                        task_desc = f"🔍 ID RESEARCH: {args.get('requirements', '')}"
+                    elif tool_name == "retrieve_module_stl":
+                        task_desc = f"📂 ASSET RETRIEVAL: {args.get('selected_module', '')}"
+                    elif tool_name == "scaffold_design":
+                        task_desc = f"🏗️ CAD SCAFFOLD: {args.get('asset_path', '')} -> {args.get('target_headset', '')}"
+                    else:
                         task_desc = args.get("task", "")
-                        print(f"[Gemini] Tool Call: {task_desc}")
                         
-                        # Execute
-                        result = await execute_tool(task_desc)
-                        
-                        # Send Response
-                        tool_resp = {
-                            "toolResponse": {
-                                "functionResponses": [{
-                                    "name": tool_name,
-                                    "response": {"result": result} 
-                                }]
-                            }
+                    print(f"[Gemini] Executing Project Morph Skill: {tool_name}")
+                    print(f"         > {task_desc}")
+                    
+                    # Execute
+                    result = await execute_tool(task_desc)
+                    
+                    # Send Response
+                    tool_resp = {
+                        "toolResponse": {
+                            "functionResponses": [{
+                                "name": tool_name,
+                                "response": {"result": result} 
+                            }]
                         }
-                        await ws.send(json.dumps(tool_resp))
+                    }
+                    await ws.send(json.dumps(tool_resp))
 
         # Start Tasks
         try:
